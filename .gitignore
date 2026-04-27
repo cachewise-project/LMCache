@@ -139,3 +139,5 @@ operator/dist/
 operator/cover.out
 operator/coverage.html
 operator/Dockerfile.cross
+lmcache/c_ops*.so
+lmcache/_version.py
