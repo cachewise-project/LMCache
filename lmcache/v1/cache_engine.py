@@ -38,6 +38,22 @@ from lmcache.utils import (
     compress_slot_mapping,
     convert_tokens_to_list,
 )
+
+import json
+import os 
+import threading
+
+_CW_PERREQ_PATH = os.environ.get("LMCACHE_PERREQ_JSONL")
+try:
+    if _CW_PERREQ_PATH:
+        os.makedirs(os.path.dirname(_CW_PERREQ_PATH), exist_ok=True)
+    _cw_perreq_fh = (
+        open(_CW_PERREQ_PATH, "a", buffering=1) if _CW_PERREQ_PATH else None
+    )
+except Exception:
+    _cw_perreq_fh = None
+_cw_perreq_lock = threading.Lock()
+
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventStatus, EventType
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
@@ -70,6 +86,18 @@ ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
 # (list of processed chunks, total kv size)
 ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
 
+
+def _cw_emit(event: dict) -> None:
+    """Append one JSON line per LMCache store/retrieve, if enabled."""
+    if _cw_perreq_fh is None:
+        return
+    event["ts"] = time.time()
+    try:
+        line = json.dumps(event) + "\n"
+    except Exception:
+        return
+    with _cw_perreq_lock:
+        _cw_perreq_fh.write(line)
 
 class CacheEngineEndSignal:
     pass
@@ -563,6 +591,18 @@ class LMCacheEngine:
             store_stats.put_time * 1000,
         )
 
+        _cw_emit({
+                "kind": "store",
+                "req_id": req_id,
+                "tokens_total": int(tot_token_num),
+                "tokens_to_store": int(num_to_store_tokens),
+                "bytes": int(tot_kv_size),
+                "time_to_store_ms": tot_time * 1000,
+                "process_tokens_ms": store_stats.process_tokens_time * 1000,
+                "from_gpu_ms": store_stats.from_gpu_time * 1000,
+                "put_ms": store_stats.put_time * 1000,
+            })        
+
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
     def store_layer(
@@ -895,6 +935,20 @@ class LMCacheEngine:
                 onload_time * 1000,
                 tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
             )
+        
+
+        _cw_emit({
+            "kind": "retrieve",
+            "req_id": req_id,
+            "tokens_required": int(num_required_tokens),
+            "tokens_retrieved": int(retrieved_tokens),
+            "tokens_total": int(len(tokens)),
+            "bytes": int(tot_kv_size),
+            "time_to_retrieve_ms": onload_time * 1000,
+            "process_tokens_ms": retrieve_stats.process_tokens_time * 1000,
+            "broadcast_ms": retrieve_stats.broadcast_time * 1000,
+            "to_gpu_ms": retrieve_stats.to_gpu_time * 1000,
+        })
         return ret_mask
 
     @_lmcache_nvtx_annotate
